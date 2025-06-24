@@ -28,17 +28,16 @@ function askQuestion(question) {
 
 async function executeDownloadScript(streamUrl, outputName) {
   return new Promise((resolve, reject) => {
-    // Cross-platform command execution
     const isWindows = process.platform === "win32";
-
+    
     let command, args;
-
+    
     if (isWindows) {
-      // Windows: Use cmd to run Python
+      // Windows: Use cmd /c start to open new window with command
       command = "cmd";
       args = [
         "/c",
-        `cd Projects\\true-scrapping\\python && python script.py ${streamUrl} ${outputName}`,
+        `start "Download ${outputName}" cmd /k "cd python && python script.py ${streamUrl} ${outputName} && pause && exit"`
       ];
     } else {
       // macOS: Use AppleScript with Terminal
@@ -51,30 +50,21 @@ async function executeDownloadScript(streamUrl, outputName) {
       args = ["-e", appleScript];
     }
 
-    const pythonProcess = spawn(command, args);
-
-    pythonProcess.stdout.on("data", (data) => {
-      console.log(`Python output for ${outputName}: ${data}`);
-    });
-
-    pythonProcess.stderr.on("data", (data) => {
-      console.error(`Python Error for ${outputName}: ${data}`);
-    });
-
-    pythonProcess.on("close", (code) => {
-      if (code === 0) {
-        console.log(`Successfully executed script for: ${outputName}`);
-        resolve();
-      } else {
-        console.error(`Script failed for ${outputName} with code: ${code}`);
-        reject(new Error(`Process exited with code ${code}`));
-      }
+    const pythonProcess = spawn(command, args, { 
+      shell: true,
+      detached: true,
+      stdio: 'ignore'
     });
 
     pythonProcess.on("error", (error) => {
       console.error(`Failed to start process for ${outputName}:`, error);
       reject(error);
     });
+
+    setTimeout(() => {
+      console.log(`Started download process for: ${outputName}`);
+      resolve();
+    }, 500);
   });
 }
 
