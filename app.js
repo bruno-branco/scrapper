@@ -3,6 +3,11 @@ import { spawn } from "child_process";
 import readline from "readline";
 import path from "path";
 import os from "os";
+import { fileURLToPath } from "url";
+
+// Resolve __dirname in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let scrappingLink = "";
 let discipline = "";
@@ -29,28 +34,35 @@ function askQuestion(question) {
 async function executeDownloadScript(streamUrl, outputName) {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === "win32";
-    
     let command, args;
-    
+
     if (isWindows) {
-      // Windows: Use cmd /c start to open new window with command
+      // Compute absolute path to the python folder alongside this script
+      const pythonDir = path.join(__dirname, "python");
+      // Wrap URLs and names in quotes to avoid parsing issues
+      const quotedUrl = `"${streamUrl}"`;
+      const quotedOutput = `"${outputName}"`;
+      // Windows: Use cmd /c start to open new window and run commands
+      // cd /d ensures drive letter is changed if needed
+      const cmdString = `cd /d "${pythonDir}" && python script.py ${quotedUrl} ${quotedOutput} && pause && exit`;
       command = "cmd";
-      args = [
-        "/c",
-        `start "Download ${outputName}" cmd /k "cd python && python script.py ${streamUrl} ${outputName} && pause && exit"`
-      ];
+      args = ["/c", `start "Download ${outputName}" cmd /k "${cmdString}"`];
     } else {
-      // macOS: Use AppleScript with Terminal
+      // macOS or Linux: adjust if needed, but focusing on Windows per request
+      const pythonDir = path.join(__dirname, "python");
+      const quotedUrl = `"${streamUrl}"`;
+      const quotedOutput = `"${outputName}"`;
+      // For macOS: open Terminal and run in that directory
       const appleScript = `
         tell application "Terminal"
-          do script "cd Projects/true-scrapping/python && python3 script.py ${streamUrl} ${outputName}"
+          do script "cd '${pythonDir.replace(/'/g, "'\\''")}' && python3 script.py ${quotedUrl} ${quotedOutput}"
         end tell
       `;
       command = "osascript";
       args = ["-e", appleScript];
     }
 
-    const pythonProcess = spawn(command, args, { 
+    const pythonProcess = spawn(command, args, {
       shell: true,
       detached: true,
       stdio: 'ignore'
@@ -108,23 +120,59 @@ async function scrap() {
 
     let streamPlayList = [];
 
+    // Retry parameters
+    const maxRetries = 3;
+    const retryDelayMs = 2000; // 2 seconds between retries
+    const navigationTimeout = 45000; // 45 seconds timeout for navigation
+
     for (const [index, link] of links.entries()) {
       console.log(`Processing link ${index + 1}/${links.length}`);
 
-      const newPage = await browser.newPage();
-      await newPage.setRequestInterception(true);
+      let attempt = 0;
+      let success = false;
 
-      newPage.on("request", (request) => {
-        if (request.url().endsWith("video.m3u8")) {
-          console.log("Found streamUrl: ", request.url());
-          streamPlayList.push(request.url());
+      while (attempt < maxRetries && !success) {
+        const attemptNum = attempt + 1;
+        console.log(`  Attempt ${attemptNum} to load ${link}`);
+        const newPage = await browser.newPage();
+        try {
+          await newPage.setRequestInterception(true);
+          newPage.on("request", (request) => {
+            if (request.url().endsWith("video.m3u8")) {
+              console.log("Found streamUrl: ", request.url());
+              streamPlayList.push(request.url());
+            }
+            request.continue();
+          });
+
+          // Set page-specific timeout
+          newPage.setDefaultNavigationTimeout(navigationTimeout);
+
+          // Use a lighter waitUntil; after DOM loaded, we wait a bit to catch requests
+          await newPage.goto(link, { waitUntil: "domcontentloaded", timeout: navigationTimeout });
+
+          // Wait briefly to allow any lazy requests for .m3u8 to fire
+          await new Promise((r) => setTimeout(r, 2000));
+
+          success = true;
+          console.log(`  Success loading link on attempt ${attemptNum}`);
+          await newPage.close();
+        } catch (error) {
+          // Check if TimeoutError
+          const isTimeout = error && (error.name === 'TimeoutError' || error.message.includes('Navigation timeout'));
+          console.warn(`  Attempt ${attemptNum} failed${isTimeout ? ' (timeout)' : ''}: ${error.message}`);
+          try { await newPage.close(); } catch (_) {}
+          attempt++;
+          if (attempt < maxRetries) {
+            console.log(`  Retrying after ${retryDelayMs}ms...`);
+            await new Promise((r) => setTimeout(r, retryDelayMs));
+          }
         }
-        request.continue();
-      });
+      }
 
-      await newPage.goto(link, { waitUntil: "networkidle0" });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      await newPage.close();
+      if (!success) {
+        console.error(`  Failed to load ${link} after ${maxRetries} attempts; skipping.`);
+      }
     }
 
     await browser.close();
