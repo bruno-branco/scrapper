@@ -141,7 +141,6 @@ async function scrap() {
         `\n--- Processing Lesson ${index + 1}/${collectedUrls.length}: ${outputName} ---`,
       );
 
-      console.log(cookieFilePath);
       try {
         await callPythonDownloader(streamUrl, outputName, cookieFilePath);
       } catch (error) {
