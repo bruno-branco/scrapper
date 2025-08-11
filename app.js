@@ -55,14 +55,21 @@ async function callPythonDownloader(playlistUrl, outputName, cookieString) {
         if (code === 0) resolve();
         else reject(new Error(`AppleScript failed with code ${code}`));
       });
-    } else {
-      // Fallback for Windows/Linux
-      const pythonProcess = spawn("python3", args, { stdio: "inherit" });
-      pythonProcess.on("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Python script failed with code ${code}`));
-      });
-    }
+    }else {
+  if (process.platform === "win32") {
+    // Open new terminal window on Windows
+    spawn("cmd.exe", ["/c", "start", "cmd", "/k", "py", ...args], {
+      detached: true
+    }).on("error", reject).on("spawn", resolve);
+  } else {
+    // Linux: run in current terminal
+    const pythonProcess = spawn("python3", args, { stdio: "inherit" });
+    pythonProcess.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Python script failed with code ${code}`));
+    });
+  }
+} 
   });
 }
 
