@@ -1,6 +1,5 @@
 @echo off
-REM Change to the desired folder:
-cd /d "C:\Users\renan\Desktop\All In All\Documentos\pos-graduacao\scrapper"
+cd /d "%~dp0"
 
 REM Run the Node app
 node app.js

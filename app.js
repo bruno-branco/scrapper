@@ -236,14 +236,32 @@ async function waitForNewPlaylistUrl(playlistUrls, seenUrls, timeoutMs = 45000) 
   throw new Error(`Timed out waiting for a ${playlistFileName} request`);
 }
 
-async function writeCookiesFile(page, playlistUrl) {
-  const cookieUrls = playlistUrl ? [page.url(), playlistUrl] : [page.url()];
+async function writeCookiesFile(page, playlistUrls = []) {
+  const playlistUrlList = Array.isArray(playlistUrls) ? playlistUrls : [playlistUrls];
+  const cookieUrls = Array.from(new Set([page.url(), ...playlistUrlList].filter(Boolean)));
   const cookies = await page.cookies(...cookieUrls);
   const cookieString = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
   const cookieFilePath = path.join(process.cwd(), "cookies.txt");
 
   await fs.writeFile(cookieFilePath, cookieString, "utf8");
   return cookieFilePath;
+}
+
+async function launchDownloadTasks(downloads, cookieFilePath) {
+  console.log(`\nStarting ${downloads.length} Python download task(s)...`);
+  const results = await Promise.allSettled(
+    downloads.map(({ streamUrl, outputName }) =>
+      callPythonDownloader(streamUrl, outputName, cookieFilePath),
+    ),
+  );
+  const failedLaunches = results.filter((result) => result.status === "rejected");
+
+  if (failedLaunches.length > 0) {
+    console.error(`Failed to launch ${failedLaunches.length} download task(s).`);
+    failedLaunches.forEach((result) => {
+      console.error(`  ${result.reason?.message || result.reason}`);
+    });
+  }
 }
 
 async function triggerVideoPlayback(page) {
@@ -306,12 +324,30 @@ async function callPythonDownloader(playlistUrl, outputName, cookieFilePath) {
         else reject(new Error(`AppleScript failed with code ${code}`));
       });
     } else if (process.platform === "win32") {
-      // Open new terminal window on Windows
-      spawn("cmd.exe", ["/c", "start", "cmd", "/k", "py", ...args], {
+      const quoteForCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
+      const command = [
+        "start",
+        '""',
+        "/D",
+        quoteForCmd(__dirname),
+        "cmd.exe",
+        "/K",
+        "py",
+        ...args.map(quoteForCmd),
+      ].join(" ");
+
+      const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+        cwd: __dirname,
         detached: true,
-      })
-        .on("error", reject)
-        .on("spawn", resolve);
+        stdio: "ignore",
+        windowsHide: false,
+      });
+
+      child.on("error", reject);
+      child.on("spawn", () => {
+        child.unref();
+        resolve();
+      });
     } else {
       // Linux: run in current terminal
       const pythonProcess = spawn("python3", args, { stdio: "inherit" });
@@ -378,12 +414,12 @@ async function scrap() {
       });
 
       const downloadedPlaylistUrls = new Set();
-      let launchedDownloads = 0;
+      const downloads = [];
 
       for (const [index, lesson] of lessons.entries()) {
         const outputName = buildOutputName(discipline, index, lesson.title);
         console.log(
-          `\n--- Processing Lesson ${index + 1}/${lessons.length}: ${outputName} ---`,
+          `\n--- Collecting Lesson ${index + 1}/${lessons.length}: ${outputName} ---`,
         );
 
         try {
@@ -403,9 +439,8 @@ async function scrap() {
           }
 
           downloadedPlaylistUrls.add(streamUrl);
-          const cookieFilePath = await writeCookiesFile(page, streamUrl);
-          await callPythonDownloader(streamUrl, outputName, cookieFilePath);
-          launchedDownloads += 1;
+          downloads.push({ streamUrl, outputName, title: lesson.title });
+          console.log(`  Captured playlist: ${streamUrl}`);
         } catch (error) {
           console.error(
             `  Skipping lesson ${outputName}: ${error.message || error}`,
@@ -413,11 +448,16 @@ async function scrap() {
         }
       }
 
-      if (launchedDownloads === 0) {
+      if (downloads.length === 0) {
         throw new Error(`No ${playlistFileName} requests were captured from the lesson cards.`);
       }
 
-      console.log(`\nLaunched ${launchedDownloads} download task(s).`);
+      console.log(`\nCollected ${downloads.length} playlist URL(s).`);
+      const cookieFilePath = await writeCookiesFile(
+        page,
+        downloads.map((download) => download.streamUrl),
+      );
+      await launchDownloadTasks(downloads, cookieFilePath);
     } else {
       console.log(
         "No lesson cards were detected. Falling back to playlist requests from the current page...",
@@ -433,22 +473,13 @@ async function scrap() {
       }
 
       console.log(`Found ${collectedUrls.length} unique playlist URL(s) to download.`);
+      const downloads = collectedUrls.map((streamUrl, index) => ({
+        streamUrl,
+        outputName: buildOutputName(discipline, index),
+      }));
+      const cookieFilePath = await writeCookiesFile(page, collectedUrls);
 
-      for (const [index, streamUrl] of collectedUrls.entries()) {
-        const outputName = buildOutputName(discipline, index);
-        console.log(
-          `\n--- Processing Lesson ${index + 1}/${collectedUrls.length}: ${outputName} ---`,
-        );
-
-        try {
-          const cookieFilePath = await writeCookiesFile(page, streamUrl);
-          await callPythonDownloader(streamUrl, outputName, cookieFilePath);
-        } catch (error) {
-          console.error(
-            `  Skipping lesson ${outputName} due to an error during launch.`,
-          );
-        }
-      }
+      await launchDownloadTasks(downloads, cookieFilePath);
     }
 
     console.log("\nAll download tasks have been launched.");

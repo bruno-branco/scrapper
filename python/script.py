@@ -2,16 +2,49 @@
 import os
 import sys
 import re
+import shutil
 import subprocess
 from tqdm import tqdm # 1. Import tqdm for the progress bar
+
+def find_executable(name):
+    """
+    Finds a command in PATH or beside the project files.
+    This keeps Windows runs working when ffmpeg.exe is dropped into the repo.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+
+    executable_names = [name]
+    if os.name == "nt" and not name.lower().endswith(".exe"):
+        executable_names.append(f"{name}.exe")
+
+    search_dirs = [
+        os.getcwd(),
+        os.path.dirname(__file__),
+        os.path.dirname(os.path.dirname(__file__)),
+    ]
+
+    for search_dir in search_dirs:
+        for executable_name in executable_names:
+            candidate = os.path.join(search_dir, executable_name)
+            if os.path.isfile(candidate):
+                return candidate
+
+    return None
 
 def get_video_duration(playlist_url, headers):
     """
     Uses ffprobe to get the total duration of the video in seconds.
     """
+    ffprobe_path = find_executable("ffprobe")
+    if not ffprobe_path:
+        print("⚠️ Warning: ffprobe was not found. Progress bar will not be shown.")
+        return None
+
     # Command to get duration using ffprobe
     cmd = [
-        'ffprobe',
+        ffprobe_path,
         '-v', 'error',
         '-headers', headers,
         '-show_entries', 'format=duration',
@@ -52,9 +85,16 @@ def download_video_with_ffmpeg(playlist_url, output_name, cookie_file_path):
     )
 
     total_duration = get_video_duration(playlist_url, headers)
+    ffmpeg_path = find_executable("ffmpeg")
+
+    if not ffmpeg_path:
+        print("❌ Error: ffmpeg was not found.")
+        print("Install FFmpeg and make sure ffmpeg.exe is in PATH, or put ffmpeg.exe in the repo folder.")
+        print(f"Current PATH: {os.environ.get('PATH', '')}")
+        sys.exit(1)
 
     cmd = [
-        'ffmpeg',
+        ffmpeg_path,
         '-y',
         '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
         '-http_persistent', '0',
@@ -103,7 +143,7 @@ def download_video_with_ffmpeg(playlist_url, output_name, cookie_file_path):
         # Print the complete, merged output for easier debugging
         print("".join(full_output))
         print("\n--------------------------")
-        print("Please ensure FFmpeg is installed and accessible in your system's PATH.")
+        print("FFmpeg was found and launched, so check the FFmpeg output above for the real failure.")
         sys.exit(1)
 
 def main():
