@@ -57,6 +57,39 @@ function isPlaylistUrl(url) {
   }
 }
 
+function isPreferredPlaylistUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.pathname.endsWith(playlistFileName) && !parsedUrl.search;
+  } catch {
+    return url.endsWith(playlistFileName);
+  }
+}
+
+function buildPlaylistKey(url) {
+  try {
+    const parsedUrl = new URL(url);
+    return `${parsedUrl.origin}${parsedUrl.pathname}`;
+  } catch {
+    return String(url).replace(/\?.*$/, "");
+  }
+}
+
+function collectUniquePlaylistUrls(playlistUrls) {
+  const uniquePlaylists = new Map();
+
+  for (const url of playlistUrls) {
+    const key = buildPlaylistKey(url);
+    const currentValue = uniquePlaylists.get(key);
+
+    if (!currentValue || (!isPreferredPlaylistUrl(currentValue) && isPreferredPlaylistUrl(url))) {
+      uniquePlaylists.set(key, url);
+    }
+  }
+
+  return Array.from(uniquePlaylists.values());
+}
+
 function sanitizeFileName(value) {
   return value
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
@@ -281,13 +314,21 @@ async function clickLessonCard(page, lesson) {
 
 async function waitForNewPlaylistUrl(playlistUrls, seenUrls, timeoutMs = 45000) {
   const startedAt = Date.now();
+  const fallbackDelayMs = 2000;
   console.log("Waiting for a new playlist request...");
 
   while (Date.now() - startedAt < timeoutMs) {
-    const freshUrl = Array.from(playlistUrls).find((url) => !seenUrls.has(url));
-    if (freshUrl) {
-      console.log(`Playlist found: ${freshUrl}`);
-      return freshUrl;
+    const freshUrls = Array.from(playlistUrls).filter((url) => !seenUrls.has(url));
+    const preferredUrl = freshUrls.find(isPreferredPlaylistUrl);
+
+    if (preferredUrl) {
+      console.log(`Playlist found: ${preferredUrl}`);
+      return preferredUrl;
+    }
+
+    if (freshUrls.length > 0 && Date.now() - startedAt >= fallbackDelayMs) {
+      console.log(`Playlist found: ${freshUrls[0]}`);
+      return freshUrls[0];
     }
     await wait(250);
   }
@@ -557,7 +598,7 @@ async function scrap() {
         lessons: lessons.map(({ id, title, subtitle }) => ({ id, title, subtitle })),
       });
 
-      const downloadedPlaylistUrls = new Set();
+      const downloadedPlaylistKeys = new Set();
       const downloads = [];
 
       for (const [index, lesson] of lessons.entries()) {
@@ -587,7 +628,9 @@ async function scrap() {
 
           const streamUrl = await waitForNewPlaylistUrl(playlistUrls, seenUrls);
 
-          if (downloadedPlaylistUrls.has(streamUrl)) {
+          const playlistKey = buildPlaylistKey(streamUrl);
+
+          if (downloadedPlaylistKeys.has(playlistKey)) {
             console.log("  Skipping duplicate playlist URL.");
             logWarn("lesson-loop", "Duplicate playlist URL skipped", {
               lessonTitle: lesson.title,
@@ -596,7 +639,7 @@ async function scrap() {
             continue;
           }
 
-          downloadedPlaylistUrls.add(streamUrl);
+          downloadedPlaylistKeys.add(playlistKey);
           downloads.push({ streamUrl, outputName, title: lesson.title });
           console.log(`  Captured playlist: ${streamUrl}`);
           logDebug("lesson-loop", "Lesson collection completed", {
@@ -640,7 +683,7 @@ async function scrap() {
       });
       await wait(5000);
 
-      const collectedUrls = Array.from(playlistUrls);
+      const collectedUrls = collectUniquePlaylistUrls(playlistUrls);
 
       if (collectedUrls.length === 0) {
         throw new Error(

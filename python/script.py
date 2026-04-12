@@ -4,8 +4,6 @@ import re
 import shutil
 import subprocess
 import sys
-from urllib.parse import urljoin
-from urllib.request import Request, urlopen
 
 from tqdm import tqdm
 
@@ -34,78 +32,7 @@ def find_executable(name):
     return None
 
 
-def fetch_text(url, headers):
-    request = Request(url, headers=headers)
-    with urlopen(request) as response:
-        return response.read().decode("utf-8", errors="replace")
-
-
-def parse_stream_inf_attributes(line):
-    attributes = {}
-    for key, value in re.findall(r'([A-Z0-9\-]+)=("[^"]+"|[^,]+)', line):
-        attributes[key] = value.strip('"')
-    return attributes
-
-
-def resolve_best_playlist_url(playlist_url, http_headers):
-    try:
-        playlist_text = fetch_text(playlist_url, http_headers)
-    except Exception as error:
-        print(f"Warning: failed to inspect playlist before download: {error}")
-        return playlist_url
-
-    if "#EXT-X-STREAM-INF" not in playlist_text:
-        print(f"Using direct media playlist: {playlist_url}")
-        return playlist_url
-
-    variants = []
-    lines = [line.strip() for line in playlist_text.splitlines()]
-
-    for index, line in enumerate(lines):
-        if not line.startswith("#EXT-X-STREAM-INF:"):
-            continue
-
-        attributes = parse_stream_inf_attributes(line)
-        next_url = ""
-        for candidate in lines[index + 1 :]:
-          if candidate and not candidate.startswith("#"):
-              next_url = urljoin(playlist_url, candidate)
-              break
-
-        if not next_url:
-            continue
-
-        resolution_text = attributes.get("RESOLUTION", "0x0")
-        width, height = 0, 0
-        if "x" in resolution_text:
-            width_text, height_text = resolution_text.lower().split("x", 1)
-            width = int(width_text) if width_text.isdigit() else 0
-            height = int(height_text) if height_text.isdigit() else 0
-
-        bandwidth = int(attributes.get("BANDWIDTH", "0"))
-        variants.append(
-            {
-                "url": next_url,
-                "resolution": resolution_text,
-                "height": height,
-                "bandwidth": bandwidth,
-            }
-        )
-
-    if not variants:
-        print(f"Warning: no variants parsed from playlist, using original URL: {playlist_url}")
-        return playlist_url
-
-    best_variant = max(variants, key=lambda item: (item["height"], item["bandwidth"]))
-    print(
-        "Resolved master playlist to media playlist:",
-        best_variant["url"],
-        f"(resolution={best_variant['resolution']}, bandwidth={best_variant['bandwidth']})",
-    )
-    return best_variant["url"]
-
-
-def get_video_duration(playlist_url, ffmpeg_headers):
+def get_video_duration(playlist_url, headers):
     ffprobe_path = find_executable("ffprobe")
     if not ffprobe_path:
         print("Warning: ffprobe was not found. Progress bar will not be shown.")
@@ -116,21 +43,21 @@ def get_video_duration(playlist_url, ffmpeg_headers):
         "-v",
         "error",
         "-headers",
-        ffmpeg_headers,
-        "-allowed_extensions",
-        "ALL",
+        headers,
         "-show_entries",
         "format=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         playlist_url,
     ]
-
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return float(result.stdout.strip())
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+    except (subprocess.CalledProcessError, FileNotFoundError):
         print("Warning: Could not determine video duration. Progress bar will not be shown.")
+        return None
+    except ValueError:
+        print("Warning: Could not parse video duration. Progress bar will not be shown.")
         return None
 
 
@@ -146,17 +73,12 @@ def download_video_with_ffmpeg(playlist_url, output_name, cookie_file_path):
         print(f"Error: The cookie file was not found at {cookie_file_path}")
         sys.exit(1)
 
-    http_headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Cookie": cookie_string,
-    }
-    ffmpeg_headers = (
-        f"User-Agent: {http_headers['User-Agent']}\r\n"
-        f"Cookie: {http_headers['Cookie']}\r\n"
+    headers = (
+        "User-Agent: Mozilla/5.0\r\n"
+        f"Cookie: {cookie_string}\r\n"
     )
 
-    resolved_playlist_url = resolve_best_playlist_url(playlist_url, http_headers)
-    total_duration = get_video_duration(resolved_playlist_url, ffmpeg_headers)
+    total_duration = get_video_duration(playlist_url, headers)
     ffmpeg_path = find_executable("ffmpeg")
 
     if not ffmpeg_path:
@@ -170,14 +92,12 @@ def download_video_with_ffmpeg(playlist_url, output_name, cookie_file_path):
         "-y",
         "-protocol_whitelist",
         "file,http,https,tcp,tls,crypto",
-        "-allowed_extensions",
-        "ALL",
         "-http_persistent",
         "0",
         "-headers",
-        ffmpeg_headers,
+        headers,
         "-i",
-        resolved_playlist_url,
+        playlist_url,
         "-c",
         "copy",
         "-progress",
@@ -221,7 +141,7 @@ def download_video_with_ffmpeg(playlist_url, output_name, cookie_file_path):
         print("\n--- FFmpeg Full Output ---")
         print("".join(full_output))
         print("\n--------------------------")
-        print("Resolved playlist used:", resolved_playlist_url)
+        print("Please ensure FFmpeg is installed and accessible in your system's PATH.")
         sys.exit(1)
 
 
