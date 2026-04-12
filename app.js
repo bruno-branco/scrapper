@@ -17,6 +17,21 @@ const rl = readline.createInterface({
 const userDataDir = path.join(os.tmpdir(), "puppeteer-session");
 const lessonCardSelector = ".card-topic.v-card--link";
 const playlistFileName = "playlist.m3u8";
+function logDebug(scope, message, details) {
+  return;
+}
+
+function logWarn(scope, message, details) {
+  return;
+}
+
+function logError(scope, message, details) {
+  return;
+}
+
+function shouldLogRequest(url = "") {
+  return false;
+}
 
 function askQuestion(question, { allowEmpty = false } = {}) {
   return new Promise((resolve) => {
@@ -63,20 +78,24 @@ function buildOutputName(discipline, index, lessonTitle = "") {
 }
 
 async function waitForPageToSettle(page) {
+  logDebug("page", "Waiting for page to settle", { url: page.url() });
   await page.waitForNetworkIdle({ idleTime: 1000, timeout: 15000 }).catch(() => {});
   await wait(1000);
+  logDebug("page", "Page settled", { url: page.url() });
 }
 
 async function navigateToCoursePage(page, coursePageUrl) {
+  logDebug("nav", "Navigating to course page", { coursePageUrl });
   await page.goto(coursePageUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
+  logDebug("nav", "Navigation completed", { currentUrl: page.url() });
   await waitForPageToSettle(page);
 }
 
 async function extractLessonCards(page) {
-  return page.$$eval(lessonCardSelector, (cards) => {
+  const lessons = await page.$$eval(lessonCardSelector, (cards) => {
     const normalizeText = (value) => value?.replace(/\s+/g, " ").trim() || "";
     const seen = new Set();
 
@@ -101,10 +120,15 @@ async function extractLessonCards(page) {
         return true;
       });
   });
+  logDebug("lessons", "Extracted lesson cards from current DOM snapshot", {
+    count: lessons.length,
+    titles: lessons.slice(0, 10).map((lesson) => lesson.title),
+  });
+  return lessons;
 }
 
 async function revealMoreLessonCards(page) {
-  return page.evaluate(async () => {
+  const moved = await page.evaluate(async () => {
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const isUsable = (element) => {
       const style = window.getComputedStyle(element);
@@ -145,12 +169,15 @@ async function revealMoreLessonCards(page) {
 
     return moved || window.scrollY !== beforeY;
   });
+  logDebug("lessons", "Attempted to reveal more lesson cards", { moved });
+  return moved;
 }
 
 async function discoverCourseLessons(page) {
   const lessonsByKey = new Map();
   let stableRounds = 0;
 
+  console.log(`Looking for lesson cards with selector: ${lessonCardSelector}`);
   await page.waitForSelector(lessonCardSelector, { timeout: 15000 }).catch(() => {});
 
   for (let round = 0; round < 40; round += 1) {
@@ -168,19 +195,36 @@ async function discoverCourseLessons(page) {
 
     const moved = await revealMoreLessonCards(page);
     stableRounds = lessonsByKey.size === beforeCount ? stableRounds + 1 : 0;
+    logDebug("lessons", "Discovery round completed", {
+      round: round + 1,
+      beforeCount,
+      afterCount: lessonsByKey.size,
+      stableRounds,
+      moved,
+    });
 
     if (!moved && stableRounds >= 2) break;
   }
 
   await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
 
-  return Array.from(lessonsByKey.values()).sort(
+  const discoveredLessons = Array.from(lessonsByKey.values()).sort(
     (a, b) => a.discoveryIndex - b.discoveryIndex,
   );
+  logDebug("lessons", "Finished lesson discovery", {
+    total: discoveredLessons.length,
+    titles: discoveredLessons.map((lesson) => lesson.title),
+  });
+  return discoveredLessons;
 }
 
 async function clickLessonCard(page, lesson) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
+    logDebug("lesson-open", "Trying to click lesson card", {
+      attempt: attempt + 1,
+      lessonTitle: lesson.title,
+      lessonId: lesson.id,
+    });
     const clicked = await page.evaluate(
       async ({ id, title, lessonCardSelector }) => {
         const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -215,9 +259,20 @@ async function clickLessonCard(page, lesson) {
       { id: lesson.id, title: lesson.title, lessonCardSelector },
     );
 
-    if (clicked) return;
+    if (clicked) {
+      logDebug("lesson-open", "Lesson card clicked", {
+        lessonTitle: lesson.title,
+        lessonId: lesson.id,
+      });
+      return;
+    }
 
     const moved = await revealMoreLessonCards(page);
+    logWarn("lesson-open", "Lesson card not found in current view", {
+      lessonTitle: lesson.title,
+      attempt: attempt + 1,
+      moved,
+    });
     if (!moved && attempt > 2) break;
   }
 
@@ -226,13 +281,18 @@ async function clickLessonCard(page, lesson) {
 
 async function waitForNewPlaylistUrl(playlistUrls, seenUrls, timeoutMs = 45000) {
   const startedAt = Date.now();
+  console.log("Waiting for a new playlist request...");
 
   while (Date.now() - startedAt < timeoutMs) {
     const freshUrl = Array.from(playlistUrls).find((url) => !seenUrls.has(url));
-    if (freshUrl) return freshUrl;
+    if (freshUrl) {
+      console.log(`Playlist found: ${freshUrl}`);
+      return freshUrl;
+    }
     await wait(250);
   }
 
+  console.log("No new playlist was found for this lesson.");
   throw new Error(`Timed out waiting for a ${playlistFileName} request`);
 }
 
@@ -244,11 +304,20 @@ async function writeCookiesFile(page, playlistUrls = []) {
   const cookieFilePath = path.join(process.cwd(), "cookies.txt");
 
   await fs.writeFile(cookieFilePath, cookieString, "utf8");
+  logDebug("cookies", "Cookies file written", {
+    cookieFilePath,
+    cookieCount: cookies.length,
+    cookieUrls,
+  });
   return cookieFilePath;
 }
 
 async function launchDownloadTasks(downloads, cookieFilePath) {
   console.log(`\nStarting ${downloads.length} Python download task(s)...`);
+  logDebug("download", "Launching Python download tasks", {
+    cookieFilePath,
+    downloads: downloads.map(({ outputName, streamUrl }) => ({ outputName, streamUrl })),
+  });
   const results = await Promise.allSettled(
     downloads.map(({ streamUrl, outputName }) =>
       callPythonDownloader(streamUrl, outputName, cookieFilePath),
@@ -265,6 +334,9 @@ async function launchDownloadTasks(downloads, cookieFilePath) {
 }
 
 async function triggerVideoPlayback(page) {
+  logDebug("playback", "Attempting to trigger video playback", {
+    url: page.url(),
+  });
   await page
     .evaluate(() => {
       const normalizeText = (value) =>
@@ -294,6 +366,9 @@ async function triggerVideoPlayback(page) {
       }
     })
     .catch(() => {});
+  logDebug("playback", "Playback trigger attempt finished", {
+    url: page.url(),
+  });
 }
 
 /**
@@ -307,6 +382,13 @@ async function callPythonDownloader(playlistUrl, outputName, cookieFilePath) {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(__dirname, "python", "script.py");
     const args = [scriptPath, playlistUrl, outputName, cookieFilePath];
+    logDebug("download", "Preparing downloader process", {
+      platform: process.platform,
+      scriptPath,
+      playlistUrl,
+      outputName,
+      cookieFilePath,
+    });
 
     console.log(`  🚀 Launching download in new window for: ${outputName}`);
 
@@ -324,24 +406,27 @@ async function callPythonDownloader(playlistUrl, outputName, cookieFilePath) {
         else reject(new Error(`AppleScript failed with code ${code}`));
       });
     } else if (process.platform === "win32") {
-      const quoteForCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
-      const command = [
-        "start",
-        '""',
-        "/D",
-        quoteForCmd(__dirname),
+      const child = spawn(
         "cmd.exe",
-        "/K",
-        "py",
-        ...args.map(quoteForCmd),
-      ].join(" ");
-
-      const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+        [
+          "/d",
+          "/c",
+          "start",
+          '""',
+          "/D",
+          __dirname,
+          "cmd.exe",
+          "/K",
+          "py",
+          ...args,
+        ],
+        {
         cwd: __dirname,
         detached: true,
         stdio: "ignore",
         windowsHide: false,
-      });
+        },
+      );
 
       child.on("error", reject);
       child.on("spawn", () => {
@@ -382,12 +467,67 @@ async function scrap() {
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
+    logDebug("browser", "Browser page created", {
+      viewport: { width: 1440, height: 900 },
+      userDataDir,
+    });
 
     const playlistUrls = new Set();
+    const observedRequests = [];
     page.on("request", (request) => {
-      if (isPlaylistUrl(request.url())) {
-        playlistUrls.add(request.url());
+      const url = request.url();
+      const entry = {
+        url,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        timestamp: new Date().toISOString(),
+      };
+
+      if (shouldLogRequest(url)) {
+        observedRequests.push(entry);
+        if (observedRequests.length > 100) observedRequests.shift();
+        logDebug("request", "Observed potentially relevant request", entry);
       }
+
+      if (isPlaylistUrl(url)) {
+        playlistUrls.add(url);
+        logDebug("request", "Captured playlist request", {
+          url,
+          totalCaptured: playlistUrls.size,
+        });
+      }
+    });
+    page.on("response", (response) => {
+      const url = response.url();
+      if (shouldLogRequest(url)) {
+        logDebug("response", "Observed potentially relevant response", {
+          url,
+          status: response.status(),
+          ok: response.ok(),
+        });
+      }
+    });
+    page.on("requestfailed", (request) => {
+      const url = request.url();
+      if (shouldLogRequest(url)) {
+        logWarn("request", "Relevant request failed", {
+          url,
+          method: request.method(),
+          resourceType: request.resourceType(),
+          failure: request.failure(),
+        });
+      }
+    });
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        logDebug("nav", "Main frame navigated", { url: frame.url() });
+      }
+    });
+    page.on("console", (msg) => {
+      logDebug("page-console", "Browser console message", {
+        type: msg.type(),
+        text: msg.text(),
+      });
     });
 
     console.log("Navigating to the discipline page...");
@@ -412,6 +552,10 @@ async function scrap() {
       lessons.forEach((lesson, index) => {
         console.log(`  ${String(index + 1).padStart(2, "0")}. ${lesson.title}`);
       });
+      logDebug("lessons", "Lesson list ready for processing", {
+        total: lessons.length,
+        lessons: lessons.map(({ id, title, subtitle }) => ({ id, title, subtitle })),
+      });
 
       const downloadedPlaylistUrls = new Set();
       const downloads = [];
@@ -425,23 +569,50 @@ async function scrap() {
         try {
           await navigateToCoursePage(page, disciplinePageUrl);
           const seenUrls = new Set(playlistUrls);
+          logDebug("lesson-loop", "Starting lesson collection", {
+            lessonNumber: index + 1,
+            lessonTitle: lesson.title,
+            outputName,
+            seenPlaylistCount: seenUrls.size,
+          });
 
           console.log(`Opening lesson: ${lesson.title}`);
           await clickLessonCard(page, lesson);
           await wait(3000);
+          logDebug("lesson-loop", "Waited after opening lesson", {
+            lessonTitle: lesson.title,
+            currentUrl: page.url(),
+          });
           await triggerVideoPlayback(page);
 
           const streamUrl = await waitForNewPlaylistUrl(playlistUrls, seenUrls);
 
           if (downloadedPlaylistUrls.has(streamUrl)) {
             console.log("  Skipping duplicate playlist URL.");
+            logWarn("lesson-loop", "Duplicate playlist URL skipped", {
+              lessonTitle: lesson.title,
+              streamUrl,
+            });
             continue;
           }
 
           downloadedPlaylistUrls.add(streamUrl);
           downloads.push({ streamUrl, outputName, title: lesson.title });
           console.log(`  Captured playlist: ${streamUrl}`);
+          logDebug("lesson-loop", "Lesson collection completed", {
+            lessonTitle: lesson.title,
+            outputName,
+            streamUrl,
+          });
         } catch (error) {
+          logError("lesson-loop", "Lesson collection failed", {
+            lessonTitle: lesson.title,
+            outputName,
+            currentUrl: page.url(),
+            capturedPlaylists: Array.from(playlistUrls),
+            recentObservedRequests: observedRequests.slice(-20),
+            error: error.message || String(error),
+          });
           console.error(
             `  Skipping lesson ${outputName}: ${error.message || error}`,
           );
@@ -462,6 +633,11 @@ async function scrap() {
       console.log(
         "No lesson cards were detected. Falling back to playlist requests from the current page...",
       );
+      logWarn("lessons", "No lesson cards detected; using fallback flow", {
+        currentUrl: page.url(),
+        capturedPlaylists: Array.from(playlistUrls),
+        recentObservedRequests: observedRequests.slice(-20),
+      });
       await wait(5000);
 
       const collectedUrls = Array.from(playlistUrls);
@@ -484,6 +660,10 @@ async function scrap() {
 
     console.log("\nAll download tasks have been launched.");
   } catch (error) {
+    logError("main", "Unexpected error in main script", {
+      error: error.message || String(error),
+      stack: error.stack,
+    });
     console.error("An unexpected error occurred in the main script:", error);
   } finally {
     if (browser) await browser.close();
