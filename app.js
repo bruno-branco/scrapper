@@ -16,6 +16,8 @@ const rl = readline.createInterface({
 
 const userDataDir = path.join(os.tmpdir(), "puppeteer-session");
 const lessonCardSelector = ".card-topic.v-card--link";
+const accordionLessonSelector = ".wrapper-topic-panels .v-expansion-panel-header";
+const accordionVideoSelector = ".v-expansion-panel-content__wrap .card-topic.v-card--link";
 const playlistFileName = "playlist.m3u8";
 function logDebug(scope, message, details) {
   return;
@@ -145,7 +147,7 @@ async function extractLessonCards(page) {
         const id = wrapper?.id || "";
         const key = id || title || `card-${index}`;
 
-        return { id, title, subtitle, index, key };
+        return { id, title, subtitle, index, key, mode: "card" };
       })
       .filter((lesson) => {
         if (!lesson.title || seen.has(lesson.key)) return false;
@@ -158,6 +160,34 @@ async function extractLessonCards(page) {
     titles: lessons.slice(0, 10).map((lesson) => lesson.title),
   });
   return lessons;
+}
+
+async function extractAccordionLessons(page) {
+  return page.$$eval(accordionLessonSelector, (headers) => {
+    const normalizeText = (value) => value?.replace(/\s+/g, " ").trim() || "";
+    const seen = new Set();
+
+    return headers
+      .map((header, index) => {
+        const title =
+          normalizeText(header.querySelector("h3")?.textContent) ||
+          normalizeText(header.textContent);
+        const key = title || `accordion-${index}`;
+
+        return {
+          title,
+          subtitle: "",
+          key,
+          index,
+          mode: "accordion",
+        };
+      })
+      .filter((lesson) => {
+        if (!lesson.title || seen.has(lesson.key)) return false;
+        seen.add(lesson.key);
+        return true;
+      });
+  });
 }
 
 async function revealMoreLessonCards(page) {
@@ -207,6 +237,15 @@ async function revealMoreLessonCards(page) {
 }
 
 async function discoverCourseLessons(page) {
+  const hasAccordionLessons = await page.$(accordionLessonSelector);
+  if (hasAccordionLessons) {
+    console.log(`Looking for lesson accordions with selector: ${accordionLessonSelector}`);
+    const accordionLessons = await extractAccordionLessons(page);
+    if (accordionLessons.length > 0) {
+      return accordionLessons;
+    }
+  }
+
   const lessonsByKey = new Map();
   let stableRounds = 0;
 
@@ -310,6 +349,89 @@ async function clickLessonCard(page, lesson) {
   }
 
   throw new Error(`Could not find card for lesson: ${lesson.title}`);
+}
+
+async function clickAccordionLesson(page, lesson) {
+  const result = await page.evaluate(
+    async ({ title, accordionLessonSelector, accordionVideoSelector }) => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalizeText = (value) => value?.replace(/\s+/g, " ").trim() || "";
+      const normalizeCompareText = (value) =>
+        normalizeText(value)
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+
+      const targetTitle = normalizeCompareText(title);
+      const headers = Array.from(document.querySelectorAll(accordionLessonSelector));
+      const header = headers.find((element) => {
+        const headerTitle =
+          element.querySelector("h3")?.textContent || element.textContent || "";
+        return normalizeCompareText(headerTitle) === targetTitle;
+      });
+
+      if (!header) {
+        return { found: false, clicked: false };
+      }
+
+      header.scrollIntoView({ block: "center", inline: "center" });
+      await wait(250);
+
+      if (header.getAttribute("aria-expanded") !== "true") {
+        header.click();
+      }
+
+      let videoLink = null;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const panel = header.closest(".v-expansion-panel");
+        const links = Array.from(panel?.querySelectorAll(accordionVideoSelector) || []);
+        videoLink =
+          links.find((link) => {
+            const text = normalizeCompareText(
+              link.querySelector("h3")?.textContent ||
+                link.getAttribute("data-testid") ||
+                link.textContent,
+            );
+            return text.includes("video");
+          }) || links[0] || null;
+
+        if (videoLink) break;
+        await wait(250);
+      }
+
+      if (!videoLink) {
+        return { found: true, clicked: false };
+      }
+
+      videoLink.scrollIntoView({ block: "center", inline: "center" });
+      await wait(250);
+
+      const target = videoLink.querySelector(".btn-enter-content") || videoLink;
+      target.click();
+
+      return {
+        found: true,
+        clicked: true,
+      };
+    },
+    { title: lesson.title, accordionLessonSelector, accordionVideoSelector },
+  );
+
+  if (!result.found) {
+    throw new Error(`Could not find accordion for lesson: ${lesson.title}`);
+  }
+
+  if (!result.clicked) {
+    throw new Error(`Could not find video entry inside accordion: ${lesson.title}`);
+  }
+}
+
+async function openLesson(page, lesson) {
+  if (lesson.mode === "accordion") {
+    return clickAccordionLesson(page, lesson);
+  }
+
+  return clickLessonCard(page, lesson);
 }
 
 async function waitForNewPlaylistUrl(playlistUrls, seenUrls, timeoutMs = 45000) {
@@ -618,7 +740,7 @@ async function scrap() {
           });
 
           console.log(`Opening lesson: ${lesson.title}`);
-          await clickLessonCard(page, lesson);
+          await openLesson(page, lesson);
           await wait(3000);
           logDebug("lesson-loop", "Waited after opening lesson", {
             lessonTitle: lesson.title,
